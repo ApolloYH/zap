@@ -283,28 +283,31 @@ jobs:
       # 以及 Alpine 等 musl 发行版)上运行。GUI AppImage/deb 仍走上面的
       # glibc 链接构建,不受影响。
       #
-      # `musl-tools` 只提供 C 编译器 `musl-gcc`,而依赖树里的 `freetype-sys`
-      # 等 *-sys crate 需要 musl 的 C++ 编译器。`musl-gcc` 本身只是个调用宿主
-      # gcc + musl specs 的 shell wrapper,这里照同样方式补一个 `musl-g++`
-      # 包装宿主 g++,并把两者按 cc-rs 期望的 `x86_64-linux-musl-{gcc,g++}`
-      # 三元组命名暴露到 PATH。
-      - name: Install musl toolchain for static CLI build
+      # 用 `cargo zigbuild` 做 musl 交叉编译:zig 自带完整的 C/C++ musl
+      # 工具链(`zig cc` / `zig c++`),不依赖宿主的 `musl-gcc` 或手写的
+      # `musl-g++` wrapper —— 历史上为 freetype-sys / harfbuzz-sys 等 *-sys
+      # 依赖准备的「宿主 g++ + musl specs」hack 因此整条移除。
+      # 本地 dev 自动构建路径(`ssh_transport.rs`)也优先用 zigbuild,两边
+      # 工具链统一。
+      - name: Install zig + cargo-zigbuild for static musl CLI build
         run: |
           set -euo pipefail
-          sudo apt-get install -y musl-tools
           rustup target add x86_64-unknown-linux-musl
-          # 生成 musl-g++ wrapper(musl-tools 没有提供)。
-          sudo tee /usr/bin/musl-g++ >/dev/null <<'EOF'
-          #!/bin/sh
-          exec "${REALGXX:-g++}" "$@" -specs "/usr/lib/musl/lib/musl-gcc.specs"
-          EOF
-          sudo chmod +x /usr/bin/musl-g++
-          # cc-rs 默认按 `<triple>-gcc` / `<triple>-g++` 找交叉编译器。
-          sudo ln -sf /usr/bin/musl-gcc /usr/local/bin/x86_64-linux-musl-gcc
-          sudo ln -sf /usr/bin/musl-g++ /usr/local/bin/x86_64-linux-musl-g++
+          # zig:用官方预编译 tarball,固定版本以保证构建可复现。
+          # 0.13.0 与 cargo-zigbuild >= 0.19 兼容。
+          ZIG_VERSION="0.13.0"
+          ZIG_DIR="$HOME/.local/zig-${ZIG_VERSION}"
+          if [ ! -x "${ZIG_DIR}/zig" ]; then
+            mkdir -p "${ZIG_DIR}"
+            curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" \
+              | tar -xJ -C "${ZIG_DIR}" --strip-components=1
+          fi
+          echo "${ZIG_DIR}" >> "$GITHUB_PATH"
+          # cargo-zigbuild:走 cargo install,首次安装在缓存里之后会复用。
+          cargo install --locked cargo-zigbuild --version ^0.19
         shell: bash
 
-      - name: Build CLI (static musl)
+      - name: Build CLI (static musl via zigbuild)
         id: bundle_cli
         run: |
           script/bundle --channel "$CHANNEL" --arch x86_64 --artifact cli --packages none \
@@ -313,11 +316,13 @@ jobs:
         env:
           GIT_RELEASE_TAG: ${{ needs.prepare_metadata.outputs.release_tag }}
           APPIMAGE_EXTRACT_AND_RUN: 1
+          # 让 script/linux/bundle 把 `cargo build` 切到 `cargo zigbuild`。
+          USE_ZIGBUILD: "true"
           # libc(musl)被 +crt-static 静态链接进二进制 —— 这是让产物摆脱
-          # 宿主 glibc 下限的关键。`libdbus-sys`(经 keyring → dbus-secret-service
-          # 链入)的 build script 用 pkg-config 探测 `dbus-1`;交叉编译时它默认
-          # 拒绝使用宿主 .pc 文件,这里放行(上面的 "Install extra dependencies"
-          # 步骤已装 libdbus-1-dev 提供 .pc 与头文件)。
+          # 宿主 glibc 下限的关键。`libdbus-sys` 现在通过 keyring 的
+          # `vendored` feature 从源码内嵌编译(见 Cargo.toml),不再用 pkg-config
+          # 探测宿主 `dbus-1`;`PKG_CONFIG_ALLOW_CROSS=1` 保留作兜底,
+          # 万一某个新引入的 -sys crate 还在用 pkg-config 也不会卡。
           PKG_CONFIG_ALLOW_CROSS: 1
 
       - name: Package CLI tarball
