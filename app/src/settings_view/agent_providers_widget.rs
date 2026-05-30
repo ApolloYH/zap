@@ -1463,114 +1463,42 @@ impl AgentProvidersWidget {
         .soft_wrap(true)
         .finish();
 
+        let header_row = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(title)
+            .with_child(
+                Expanded::new(
+                    1.,
+                    Container::new(description).with_margin_left(8.).finish(),
+                )
+                .finish(),
+            )
+            .finish();
+
+        let codex_button = Self::render_card_button(
+            crate::t!("settings-agent-providers-auth-login-codex-login"),
+            self.codex_login_button_state.clone(),
+            AISettingsPageAction::StartCodexAuthLogin,
+            appearance,
+        );
+        let copilot_button = Self::render_card_button(
+            crate::t!("settings-agent-providers-auth-login-copilot-login"),
+            self.copilot_login_button_state.clone(),
+            AISettingsPageAction::StartCopilotAuthLogin,
+            appearance,
+        );
+        let button_row = Wrap::row()
+            .with_spacing(6.)
+            .with_run_spacing(6.)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(codex_button)
+            .with_child(copilot_button)
+            .finish();
+
         let body = Flex::column()
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(title)
-            .with_child(Container::new(description).with_margin_top(4.).finish())
-            .with_child(
-                Container::new(
-                    Flex::row()
-                        .with_cross_axis_alignment(CrossAxisAlignment::Start)
-                        .with_child(
-                            Expanded::new(
-                                1.,
-                                Container::new(
-                                    Flex::column()
-                                        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                                        .with_child(Text::new(
-                                            crate::t!(
-                                                "settings-agent-providers-auth-login-codex-title"
-                                            ),
-                                            appearance.ui_font_family(),
-                                            appearance.ui_font_size(),
-                                        )
-                                        .with_color(label_color.into())
-                                        .finish())
-                                        .with_child(
-                                            Container::new(Text::new(
-                                                crate::t!(
-                                                    "settings-agent-providers-auth-login-codex-description"
-                                                ),
-                                                appearance.ui_font_family(),
-                                                appearance.ui_font_size(),
-                                            )
-                                            .with_color(dim_color.into())
-                                            .soft_wrap(true)
-                                            .finish())
-                                            .with_margin_top(4.)
-                                            .finish(),
-                                        )
-                                        .with_child(
-                                            Container::new(Self::render_card_button(
-                                                crate::t!(
-                                                    "settings-agent-providers-auth-login-codex-login"
-                                                ),
-                                                self.codex_login_button_state.clone(),
-                                                AISettingsPageAction::StartCodexAuthLogin,
-                                                appearance,
-                                            ))
-                                            .with_margin_top(8.)
-                                            .finish(),
-                                        )
-                                        .finish(),
-                                )
-                                .with_margin_right(12.)
-                                .finish(),
-                            )
-                            .finish(),
-                        )
-                        .with_child(
-                            Expanded::new(
-                                1.,
-                                Container::new(
-                                    Flex::column()
-                                        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                                        .with_child(Text::new(
-                                            crate::t!(
-                                                "settings-agent-providers-auth-login-copilot-title"
-                                            ),
-                                            appearance.ui_font_family(),
-                                            appearance.ui_font_size(),
-                                        )
-                                        .with_color(label_color.into())
-                                        .finish())
-                                        .with_child(
-                                            Container::new(Text::new(
-                                                crate::t!(
-                                                    "settings-agent-providers-auth-login-copilot-description"
-                                                ),
-                                                appearance.ui_font_family(),
-                                                appearance.ui_font_size(),
-                                            )
-                                            .with_color(dim_color.into())
-                                            .soft_wrap(true)
-                                            .finish())
-                                            .with_margin_top(4.)
-                                            .finish(),
-                                        )
-                                        .with_child(
-                                            Container::new(Self::render_card_button(
-                                                crate::t!(
-                                                    "settings-agent-providers-auth-login-copilot-login"
-                                                ),
-                                                self.copilot_login_button_state.clone(),
-                                                AISettingsPageAction::StartCopilotAuthLogin,
-                                                appearance,
-                                            ))
-                                            .with_margin_top(8.)
-                                            .finish(),
-                                        )
-                                        .finish(),
-                                )
-                                .finish(),
-                            )
-                            .finish(),
-                        )
-                        .finish(),
-                )
-                    .with_margin_top(8.)
-                    .finish(),
-            );
+            .with_child(header_row)
+            .with_child(Container::new(button_row).with_margin_top(4.).finish());
 
         Container::new(body.finish())
         .with_background(appearance.theme().surface_1())
