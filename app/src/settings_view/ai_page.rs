@@ -3212,10 +3212,7 @@ impl TypedActionView for AISettingsPageView {
                     }
                 };
                 let window_id = ctx.window_id();
-                log::info!(
-                    "Started Copilot OAuth device flow. User code copied to clipboard: {}",
-                    flow.user_code
-                );
+                log::info!("Started Copilot OAuth device flow. User code copied to clipboard");
                 ctx.clipboard()
                     .write(ClipboardContent::plain_text(flow.user_code.clone()));
                 let toast_id = "copilot-oauth-login".to_string();
@@ -3241,9 +3238,14 @@ impl TypedActionView for AISettingsPageView {
                         use crate::ai::agent_providers::copilot_oauth;
 
                         let credentials = copilot_oauth::wait_for_login(flow).await?;
-                        let models =
-                            copilot_oauth::fetch_copilot_oauth_models(&credentials.access_token)
-                                .await?;
+                        let models = copilot_oauth::fetch_copilot_oauth_models(
+                            copilot_oauth::github_token(&credentials),
+                        )
+                        .await
+                        .unwrap_or_else(|e| {
+                            log::warn!("Failed to fetch Copilot OAuth models: {e:#}");
+                            copilot_oauth::default_copilot_oauth_models()
+                        });
                         anyhow::Ok((credentials, models))
                     },
                     move |view, result, ctx| {

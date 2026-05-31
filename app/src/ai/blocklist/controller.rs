@@ -3189,9 +3189,27 @@ impl BlocklistAIController {
                 pending.oauth_credentials = Some(refreshed.credentials.clone());
                 Ok(Some((pending.provider_id.clone(), refreshed.credentials)))
             }
-            crate::settings::AgentProviderAuthKind::CopilotOAuth => Err(anyhow!(
-                "Copilot OAuth 标题生成凭据已过期，请在设置里重新登录 Copilot Auth"
-            )),
+            crate::settings::AgentProviderAuthKind::CopilotOAuth => {
+                let Some(refreshed) =
+                    crate::ai::agent_providers::refresh_oauth_credentials_if_needed(
+                        pending.auth_kind,
+                        &credentials,
+                        &pending.provider_extra_headers,
+                    )
+                    .await
+                    .map_err(|e| {
+                        anyhow!(
+                            "Copilot OAuth 标题生成 token exchange 失败，请确认 GitHub Copilot 账号可用后重试: {e:#}"
+                        )
+                    })?
+                else {
+                    return Ok(None);
+                };
+                pending.input.api_key = refreshed.api_key;
+                pending.input.extra_headers = refreshed.extra_headers;
+                pending.oauth_credentials = Some(refreshed.credentials.clone());
+                Ok(Some((pending.provider_id.clone(), refreshed.credentials)))
+            }
         }
     }
 

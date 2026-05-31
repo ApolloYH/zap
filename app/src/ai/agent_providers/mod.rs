@@ -53,7 +53,7 @@ use crate::ai::llms::{
     AvailableLLMs, DisableReason, LLMContextWindow, LLMInfo, LLMProvider, LLMUsageMetadata,
     ModelsByFeature,
 };
-use crate::settings::{AISettings, AgentProvider, AgentProviderAuthKind};
+use crate::settings::{AISettings, AgentProvider, AgentProviderApiType, AgentProviderAuthKind};
 
 /// 合成给定 provider 的所有合法 (provider, model) 对的 LLMInfo 列表。
 ///
@@ -184,6 +184,23 @@ pub struct OAuthRefreshResult {
     pub extra_headers: Vec<(String, String)>,
 }
 
+fn copilot_uses_responses_api(model_id: &str) -> bool {
+    if model_id.starts_with("gpt-5-mini") {
+        return false;
+    }
+
+    let Some(rest) = model_id.strip_prefix("gpt-") else {
+        return false;
+    };
+    let major = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    major
+        .parse::<u32>()
+        .is_ok_and(|major| major >= 5)
+}
+
 /// 对齐 opencode:每次真正发请求前检查 OAuth access token 是否需要刷新。
 /// 刷新成功后调用方负责把 `credentials` 写回安全存储。
 pub async fn refresh_oauth_credentials_if_needed(
@@ -209,9 +226,16 @@ pub async fn refresh_oauth_credentials_if_needed(
                 extra_headers,
             }))
         }
-        AgentProviderAuthKind::CopilotOAuth => anyhow::bail!(
-            "Copilot OAuth token 已过期，请在设置里重新登录 Copilot Auth"
-        ),
+        AgentProviderAuthKind::CopilotOAuth => {
+            let refreshed = copilot_oauth::refresh_credentials(credentials).await?;
+            let mut extra_headers = provider_extra_headers.to_vec();
+            extra_headers.extend(copilot_oauth::request_headers());
+            Ok(Some(OAuthRefreshResult {
+                api_key: refreshed.access_token.clone(),
+                credentials: refreshed,
+                extra_headers,
+            }))
+        }
     }
 }
 
@@ -220,7 +244,12 @@ pub async fn refresh_oauth_credentials_if_needed(
 pub fn lookup_byop(app: &AppContext, id: &ai::LLMId) -> Option<ByopLookup> {
     let (provider_id, model_id) = llm_id::decode(id)?;
     let providers = AISettings::as_ref(app).agent_providers.value().clone();
-    let provider = providers.into_iter().find(|p| p.id == provider_id)?;
+    let mut provider = providers.into_iter().find(|p| p.id == provider_id)?;
+    if matches!(provider.auth_kind, AgentProviderAuthKind::CopilotOAuth)
+        && copilot_uses_responses_api(&model_id)
+    {
+        provider.api_type = AgentProviderApiType::OpenAiResp;
+    }
     let mut extra_headers = provider.extra_headers.clone();
     let mut oauth_credentials = None;
     let api_key = match provider.auth_kind {
@@ -246,7 +275,7 @@ pub fn lookup_byop(app: &AppContext, id: &ai::LLMId) -> Option<ByopLookup> {
                 .get(&provider_id)
                 .cloned()?;
             extra_headers.extend(copilot_oauth::request_headers());
-            let access_token = credentials.access_token.clone();
+            let access_token = copilot_oauth::github_token(&credentials).to_owned();
             oauth_credentials = Some(credentials);
             access_token
         }

@@ -730,9 +730,28 @@ async fn refresh_byop_oauth_if_needed(
             let provider_id = byop.provider_id.clone();
             Ok((byop, Some((provider_id, refreshed.credentials))))
         }
-        crate::settings::AgentProviderAuthKind::CopilotOAuth => Err(
-            "Copilot OAuth 登录已过期，请在设置里重新登录 Copilot Auth。".to_string(),
-        ),
+        crate::settings::AgentProviderAuthKind::CopilotOAuth => {
+            let Some(refreshed) =
+                crate::ai::agent_providers::refresh_oauth_credentials_if_needed(
+                    byop.auth_kind,
+                    &credentials,
+                    &byop.provider_extra_headers,
+                )
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Copilot OAuth token exchange 失败，请确认 GitHub Copilot 账号可用后重试。\n\n{e:#}"
+                    )
+                })?
+            else {
+                return Ok((byop, None));
+            };
+            byop.api_key = refreshed.api_key;
+            byop.extra_headers = refreshed.extra_headers;
+            byop.oauth_credentials = Some(refreshed.credentials.clone());
+            let provider_id = byop.provider_id.clone();
+            Ok((byop, Some((provider_id, refreshed.credentials))))
+        }
     }
 }
 

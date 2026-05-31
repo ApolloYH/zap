@@ -1,13 +1,13 @@
 //! GitHub Copilot / GitHub Models OAuth 登录支持。
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Context as _};
-use serde::Deserialize;
+use anyhow::{Context as _, anyhow};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{AgentProviderOAuthCredentials, AgentProviderOAuthKind};
@@ -15,20 +15,15 @@ use super::{AgentProviderOAuthCredentials, AgentProviderOAuthKind};
 pub const COPILOT_PROVIDER_NAME: &str = "Copilot Auth";
 pub const COPILOT_BASE_URL: &str = "https://api.githubcopilot.com/";
 
-// 说明:
-// 这里使用公开可观察到的 GitHub Copilot CLI OAuth app client id 来走 device flow。
-// 我们没有在仓库里找到 OpenCode 私有实现细节,因此这里按 GitHub 官方 device flow
-// 协议接入,client id 视作与 Copilot CLI 生态对齐的实现细节。
-const GITHUB_COPILOT_OAUTH_CLIENT_ID: &str = "01ab8ac9400c4e429b23";
+const GITHUB_COPILOT_OAUTH_CLIENT_ID: &str = "Ov23li8tweQw6odWQebz";
 const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const GITHUB_ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
-const GITHUB_COPILOT_TOKEN_EXCHANGE_URL: &str = "https://api.github.com/copilot_internal/v2/token";
 const GITHUB_USER_URL: &str = "https://api.github.com/user";
 const GITHUB_COPILOT_MODELS_URL: &str = "https://api.githubcopilot.com/models";
-const USER_AGENT: &str = "Zap/1.0";
-const EDITOR_VERSION: &str = "Zap/1.0";
-const EDITOR_PLUGIN_VERSION: &str = "Zap/1.0";
-const COPILOT_INTEGRATION_ID: &str = "zap";
+const USER_AGENT: &str = "opencode/0.0.0";
+const EDITOR_VERSION: &str = "vscode/1.107.0";
+const EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.35.0";
+const COPILOT_INTEGRATION_ID: &str = "vscode-chat";
 const OAUTH_SCOPE: &str = "read:user";
 
 #[derive(Debug, Clone)]
@@ -64,6 +59,8 @@ struct AccessTokenResponse {
     error: Option<String>,
     #[serde(default)]
     error_description: Option<String>,
+    #[serde(default)]
+    interval: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,10 +68,17 @@ struct GitHubUserResponse {
     login: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct CopilotTokenExchangeResponse {
-    token: String,
-    expires_at: u64,
+#[derive(Serialize)]
+struct DeviceCodeRequest<'a> {
+    client_id: &'a str,
+    scope: &'a str,
+}
+
+#[derive(Serialize)]
+struct AccessTokenRequest<'a> {
+    client_id: &'a str,
+    device_code: &'a str,
+    grant_type: &'a str,
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -121,11 +125,12 @@ pub fn begin_login() -> anyhow::Result<LoginFlow> {
     let response = client
         .post(GITHUB_DEVICE_CODE_URL)
         .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
         .header("User-Agent", USER_AGENT)
-        .form(&[
-            ("client_id", GITHUB_COPILOT_OAUTH_CLIENT_ID),
-            ("scope", OAUTH_SCOPE),
-        ])
+        .json(&DeviceCodeRequest {
+            client_id: GITHUB_COPILOT_OAUTH_CLIENT_ID,
+            scope: OAUTH_SCOPE,
+        })
         .send()
         .context("请求 GitHub device code 失败")?
         .error_for_status()
@@ -150,6 +155,8 @@ pub fn begin_login() -> anyhow::Result<LoginFlow> {
 
 pub fn request_headers() -> Vec<(String, String)> {
     vec![
+        ("Openai-Intent".to_string(), "conversation-edits".to_string()),
+        ("X-Initiator".to_string(), "agent".to_string()),
         ("Editor-Version".to_string(), EDITOR_VERSION.to_string()),
         (
             "Editor-Plugin-Version".to_string(),
@@ -184,12 +191,13 @@ pub async fn wait_for_login(flow: LoginFlow) -> anyhow::Result<AgentProviderOAut
         let payload = client
             .post(GITHUB_ACCESS_TOKEN_URL)
             .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
             .header("User-Agent", USER_AGENT)
-            .form(&[
-                ("client_id", GITHUB_COPILOT_OAUTH_CLIENT_ID),
-                ("device_code", flow.device_code.as_str()),
-                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-            ])
+            .json(&AccessTokenRequest {
+                client_id: GITHUB_COPILOT_OAUTH_CLIENT_ID,
+                device_code: flow.device_code.as_str(),
+                grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+            })
             .send()
             .await
             .context("轮询 GitHub access token 失败")?
@@ -200,13 +208,14 @@ pub async fn wait_for_login(flow: LoginFlow) -> anyhow::Result<AgentProviderOAut
             .context("解析 GitHub access token 响应失败")?;
 
         if let Some(access_token) = payload.access_token {
-            let copilot = exchange_github_token(&client, &access_token).await?;
             let account_id = fetch_github_login(&access_token).await?;
             return Ok(AgentProviderOAuthCredentials {
                 kind: AgentProviderOAuthKind::Copilot,
-                access_token: copilot.token,
-                refresh_token: String::new(),
-                expires_at_ms: copilot.expires_at.saturating_mul(1000),
+                // 对齐 opencode:GitHub OAuth token 直接作为 api.githubcopilot.com
+                // 请求的 Bearer token 使用。
+                access_token: access_token.clone(),
+                refresh_token: access_token,
+                expires_at_ms: 0,
                 account_id,
             });
         }
@@ -214,7 +223,10 @@ pub async fn wait_for_login(flow: LoginFlow) -> anyhow::Result<AgentProviderOAut
         match payload.error.as_deref() {
             Some("authorization_pending") => {}
             Some("slow_down") => {
-                interval_secs = interval_secs.saturating_add(5);
+                interval_secs = payload
+                    .interval
+                    .filter(|interval| *interval > 0)
+                    .unwrap_or_else(|| interval_secs.saturating_add(5));
             }
             Some("access_denied") => return Err(anyhow!("Copilot 登录已取消")),
             Some("expired_token") => return Err(anyhow!("Copilot 登录已过期，请重新点击登录")),
@@ -233,22 +245,25 @@ pub async fn wait_for_login(flow: LoginFlow) -> anyhow::Result<AgentProviderOAut
     }
 }
 
-async fn exchange_github_token(
-    client: &http_client::Client,
-    github_token: &str,
-) -> anyhow::Result<CopilotTokenExchangeResponse> {
-    client
-        .get(GITHUB_COPILOT_TOKEN_EXCHANGE_URL)
-        .header("Authorization", format!("Token {github_token}"))
-        .header("User-Agent", USER_AGENT)
-        .send()
-        .await
-        .context("请求 GitHub Copilot token exchange 失败")?
-        .error_for_status()
-        .map_err(|e| anyhow::Error::new(e).context("GitHub Copilot token exchange 返回错误状态"))?
-        .json::<CopilotTokenExchangeResponse>()
-        .await
-        .context("解析 GitHub Copilot token exchange 响应失败")
+pub async fn refresh_credentials(
+    credentials: &AgentProviderOAuthCredentials,
+) -> anyhow::Result<AgentProviderOAuthCredentials> {
+    let github_token = github_token(credentials);
+    Ok(AgentProviderOAuthCredentials {
+        kind: AgentProviderOAuthKind::Copilot,
+        access_token: github_token.to_owned(),
+        refresh_token: github_token.to_owned(),
+        expires_at_ms: u64::MAX,
+        account_id: credentials.account_id.clone(),
+    })
+}
+
+pub fn github_token(credentials: &AgentProviderOAuthCredentials) -> &str {
+    if credentials.refresh_token.is_empty() {
+        credentials.access_token.as_str()
+    } else {
+        credentials.refresh_token.as_str()
+    }
 }
 
 pub fn cancel_login(flow: &LoginFlow) {
@@ -308,10 +323,7 @@ pub async fn fetch_copilot_oauth_models(
         }
     };
 
-    let mut models: Vec<_> = entries
-        .iter()
-        .filter_map(parse_copilot_model)
-        .collect();
+    let mut models: Vec<_> = entries.iter().filter_map(parse_copilot_model).collect();
 
     models.sort_by(|a, b| a.id.cmp(&b.id));
     models.dedup_by(|a, b| a.id == b.id);
@@ -319,6 +331,33 @@ pub async fn fetch_copilot_oauth_models(
         return Err(anyhow!("GitHub Copilot models 返回了空模型列表"));
     }
     Ok(models)
+}
+
+pub fn default_copilot_oauth_models() -> Vec<crate::settings::AgentProviderModel> {
+    // Copilot 的 /models endpoint 会按账号、计划和客户端能力做过滤,部分 token 会返回 400。
+    // 登录流程不能因此失败,这里保留一组可编辑的保守默认值。
+    [
+        ("GPT-5.4", "gpt-5.4", 272_000, 128_000, true),
+        ("GPT-5.4 Mini", "gpt-5.4-mini", 272_000, 128_000, true),
+        ("GPT-5.3 Codex", "gpt-5.3-codex", 272_000, 128_000, true),
+        ("GPT-5 Mini", "gpt-5-mini", 128_000, 32_000, true),
+        ("GPT-4.1", "gpt-4.1", 128_000, 16_384, false),
+    ]
+    .into_iter()
+    .map(|(name, id, context_window, max_output_tokens, reasoning)| {
+        crate::settings::AgentProviderModel {
+            name: name.to_string(),
+            id: id.to_string(),
+            context_window,
+            max_output_tokens,
+            reasoning,
+            tool_call: true,
+            image: Some(true),
+            pdf: Some(false),
+            audio: Some(false),
+        }
+    })
+    .collect()
 }
 
 fn parse_copilot_model(entry: &Value) -> Option<crate::settings::AgentProviderModel> {
@@ -337,14 +376,49 @@ fn parse_copilot_model(entry: &Value) -> Option<crate::settings::AgentProviderMo
         .unwrap_or(id.as_str())
         .to_owned();
 
+    let context_window = entry
+        .pointer("/capabilities/limits/max_context_window_tokens")
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or_default();
+    let max_output_tokens = entry
+        .pointer("/capabilities/limits/max_output_tokens")
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or_default();
+    let supports = entry.get("capabilities")?.get("supports")?;
+    let reasoning = supports
+        .get("adaptive_thinking")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || supports
+            .get("reasoning_effort")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+        || supports.get("max_thinking_budget").is_some()
+        || supports.get("min_thinking_budget").is_some();
+    let image = supports
+        .get("vision")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || entry
+            .pointer("/capabilities/limits/vision/supported_media_types")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|media_type| media_type.starts_with("image/"))
+            });
+
     Some(crate::settings::AgentProviderModel {
         name,
         id,
-        context_window: 0,
-        max_output_tokens: 0,
-        reasoning: false,
+        context_window,
+        max_output_tokens,
+        reasoning,
         tool_call: true,
-        image: None,
+        image: Some(image),
         pdf: None,
         audio: None,
     })
