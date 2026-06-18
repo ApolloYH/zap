@@ -3,15 +3,15 @@
 //! This module provides types for detecting and working with CLI-based AI agents
 //! like Claude Code, Gemini CLI, Codex, Amp, and Droid.
 
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::path::Path;
 use ai::skills::SkillProvider;
 use enum_iterator::Sequence;
 use markdown_parser::parse_markdown;
 use pathfinder_color::ColorU;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use warp_editor::content::{buffer::Buffer, markdown::MarkdownStyle};
 
 use warpui::{AppContext, Entity, ModelContext, SingletonEntity};
@@ -601,11 +601,7 @@ impl CLIAgentInstallModel {
         Self { cache: None }
     }
 
-    fn on_scan_complete(
-        &mut self,
-        results: HashMap<CLIAgent, bool>,
-        ctx: &mut ModelContext<Self>,
-    ) {
+    fn on_scan_complete(&mut self, results: HashMap<CLIAgent, bool>, ctx: &mut ModelContext<Self>) {
         self.cache = Some(results.clone());
 
         // 自动同步到 per-agent 设置
@@ -654,10 +650,58 @@ fn cli_agent_is_on_path(agent: CLIAgent) -> bool {
 /// 内联 PATH 搜索，零进程、零闪窗。
 #[cfg(unix)]
 fn is_on_path(cmd: &str) -> bool {
-    let Ok(path_var) = std::env::var("PATH") else {
-        return false;
+    cli_agent_search_dirs().any(|dir| dir.join(cmd).is_file())
+}
+
+#[cfg(unix)]
+fn cli_agent_search_dirs() -> impl Iterator<Item = PathBuf> {
+    let mut dirs = Vec::new();
+
+    if let Some(path_var) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path_var));
+    }
+
+    extend_common_cli_dirs(&mut dirs);
+    dedupe_paths(dirs).into_iter()
+}
+
+#[cfg(unix)]
+fn extend_common_cli_dirs(dirs: &mut Vec<PathBuf>) {
+    dirs.extend([
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/opt/homebrew/sbin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/usr/local/sbin"),
+    ]);
+
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
     };
-    std::env::split_paths(&path_var).any(|dir| dir.join(cmd).is_file())
+
+    dirs.extend([
+        home.join(".cargo/bin"),
+        home.join(".bun/bin"),
+        home.join(".local/bin"),
+    ]);
+
+    if let Ok(node_versions) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+        dirs.extend(
+            node_versions
+                .filter_map(Result::ok)
+                .map(|entry| entry.path().join("bin")),
+        );
+    }
+}
+
+#[cfg(unix)]
+fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut deduped = Vec::with_capacity(paths.len());
+    for path in paths {
+        if !deduped.contains(&path) {
+            deduped.push(path);
+        }
+    }
+    deduped
 }
 
 #[cfg(windows)]
