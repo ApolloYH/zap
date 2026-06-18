@@ -2430,6 +2430,8 @@ pub enum AISettingsPageAction {
     // 自定义 Agent Provider 管理动作
     AddAgentProvider,
     StartCodexAuthLogin,
+    ImportCodexAuthJson,
+    ImportCodexAuthJsonFromPath(PathBuf),
     StartCopilotAuthLogin,
     RemoveAgentProvider {
         provider_id: String,
@@ -3300,6 +3302,71 @@ impl TypedActionView for AISettingsPageView {
                             .is_some_and(|active| Arc::ptr_eq(active, &cancel_handle))
                         {
                             view.active_codex_login_cancel_handle = None;
+                        }
+                        view.rebuild_current_page(ctx);
+                    },
+                );
+            }
+            AISettingsPageAction::ImportCodexAuthJson => {
+                ctx.open_file_picker(
+                    |result, ctx| match result {
+                        Ok(paths) => {
+                            if let Some(path) = paths.into_iter().next() {
+                                ctx.dispatch_typed_action_deferred(
+                                    AISettingsPageAction::ImportCodexAuthJsonFromPath(
+                                        PathBuf::from(path),
+                                    ),
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to open Codex auth.json picker: {e:#}");
+                            Self::add_info_toast(
+                                crate::t!(
+                                    "settings-agent-providers-codex-import-auth-json-failed-toast",
+                                    error = format!("{e:#}")
+                                ),
+                                ctx,
+                            );
+                            ctx.notify();
+                        }
+                    },
+                    warpui::platform::FilePickerConfiguration::new(),
+                );
+            }
+            AISettingsPageAction::ImportCodexAuthJsonFromPath(path) => {
+                let path = path.clone();
+                ctx.spawn(
+                    async move {
+                        use crate::ai::agent_providers::codex_oauth;
+
+                        let credentials = codex_oauth::credentials_from_auth_json_file(&path)?;
+                        let models = codex_oauth::codex_oauth_models();
+                        anyhow::Ok((credentials, models, path))
+                    },
+                    move |view, result, ctx| {
+                        match result {
+                            Ok((credentials, models, path)) => {
+                                Self::add_codex_oauth_provider(credentials, models, ctx);
+                                Self::add_info_toast(
+                                    crate::t!(
+                                        "settings-agent-providers-codex-import-auth-json-success-toast",
+                                        path = path.display().to_string()
+                                    ),
+                                    ctx,
+                                );
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to import Codex auth.json: {e:#}");
+                                Self::add_info_toast(
+                                    crate::t!(
+                                        "settings-agent-providers-codex-import-auth-json-failed-toast",
+                                        error = format!("{e:#}")
+                                    ),
+                                    ctx,
+                                );
+                                ctx.notify();
+                            }
                         }
                         view.rebuild_current_page(ctx);
                     },

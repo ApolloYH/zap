@@ -269,6 +269,7 @@ impl ProviderDraftEditors {
 pub(super) struct AgentProvidersWidget {
     add_button_state: MouseStateHandle,
     codex_login_button_state: MouseStateHandle,
+    codex_auth_json_button_state: MouseStateHandle,
     copilot_login_button_state: MouseStateHandle,
     refresh_catalog_button_state: MouseStateHandle,
     expand_chips_button_state: MouseStateHandle,
@@ -318,6 +319,7 @@ impl AgentProvidersWidget {
         Self {
             add_button_state: MouseStateHandle::default(),
             codex_login_button_state: MouseStateHandle::default(),
+            codex_auth_json_button_state: MouseStateHandle::default(),
             copilot_login_button_state: MouseStateHandle::default(),
             refresh_catalog_button_state: MouseStateHandle::default(),
             expand_chips_button_state: MouseStateHandle::default(),
@@ -1481,6 +1483,12 @@ impl AgentProvidersWidget {
             AISettingsPageAction::StartCodexAuthLogin,
             appearance,
         );
+        let codex_auth_json_button = Self::render_card_button(
+            crate::t!("settings-agent-providers-auth-login-codex-import-auth-json"),
+            self.codex_auth_json_button_state.clone(),
+            AISettingsPageAction::ImportCodexAuthJson,
+            appearance,
+        );
         let copilot_button = Self::render_card_button(
             crate::t!("settings-agent-providers-auth-login-copilot-login"),
             self.copilot_login_button_state.clone(),
@@ -1492,6 +1500,7 @@ impl AgentProvidersWidget {
             .with_run_spacing(6.)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(codex_button)
+            .with_child(codex_auth_json_button)
             .with_child(copilot_button)
             .finish();
 
@@ -1501,11 +1510,11 @@ impl AgentProvidersWidget {
             .with_child(Container::new(button_row).with_margin_top(4.).finish());
 
         Container::new(body.finish())
-        .with_background(appearance.theme().surface_1())
-        .with_uniform_padding(10.)
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
-        .with_margin_bottom(10.)
-        .finish()
+            .with_background(appearance.theme().surface_1())
+            .with_uniform_padding(10.)
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+            .with_margin_bottom(10.)
+            .finish()
     }
 
     /// 渲染 "来自 models.dev 的已知 provider 快速添加" 区:

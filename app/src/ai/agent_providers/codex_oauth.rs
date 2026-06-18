@@ -1,9 +1,11 @@
 //! Codex / ChatGPT OAuth login support for Agent Providers.
 
 use std::collections::HashMap;
+use std::fs;
 use std::io::ErrorKind;
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -50,6 +52,18 @@ struct TokenResponse {
     access_token: String,
     refresh_token: Option<String>,
     expires_in: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexCliAuthJson {
+    tokens: CodexCliAuthTokens,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexCliAuthTokens {
+    access_token: String,
+    refresh_token: String,
+    account_id: String,
 }
 
 pub fn request_headers(account_id: &str) -> Vec<(String, String)> {
@@ -134,6 +148,29 @@ pub async fn wait_for_login(flow: LoginFlow) -> anyhow::Result<AgentProviderOAut
     exchange_code(&code.0, &code.1).await
 }
 
+pub fn credentials_from_auth_json_file(
+    path: &Path,
+) -> anyhow::Result<AgentProviderOAuthCredentials> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("无法读取 Codex auth.json: {}", path.display()))?;
+    credentials_from_auth_json_str(&raw)
+}
+
+pub fn credentials_from_auth_json_str(raw: &str) -> anyhow::Result<AgentProviderOAuthCredentials> {
+    let auth: CodexCliAuthJson = serde_json::from_str(raw).context("无法解析 Codex auth.json")?;
+    let access_token = non_empty_field(auth.tokens.access_token, "tokens.access_token")?;
+    let refresh_token = non_empty_field(auth.tokens.refresh_token, "tokens.refresh_token")?;
+    let account_id = non_empty_field(auth.tokens.account_id, "tokens.account_id")?;
+
+    Ok(AgentProviderOAuthCredentials {
+        kind: AgentProviderOAuthKind::Codex,
+        access_token,
+        refresh_token,
+        expires_at_ms: 0,
+        account_id,
+    })
+}
+
 pub async fn refresh_credentials(
     credentials: &AgentProviderOAuthCredentials,
 ) -> anyhow::Result<AgentProviderOAuthCredentials> {
@@ -195,6 +232,13 @@ fn credentials_from_token_response(
         expires_at_ms: now_ms + token.expires_in.saturating_mul(1000),
         account_id,
     })
+}
+
+fn non_empty_field(value: String, field: &str) -> anyhow::Result<String> {
+    if value.trim().is_empty() {
+        return Err(anyhow!("Codex auth.json 缺少 {field}"));
+    }
+    Ok(value)
 }
 
 fn receive_callback(
@@ -304,4 +348,36 @@ pub fn codex_oauth_models() -> Vec<crate::settings::AgentProviderModel> {
         audio: Some(false),
     })
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_codex_cli_auth_json() {
+        let credentials = credentials_from_auth_json_str(
+            r#"{
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "id_token": "id-token",
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "account_id": "account-id"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(credentials.kind, AgentProviderOAuthKind::Codex);
+        assert_eq!(credentials.access_token, "access-token");
+        assert_eq!(credentials.refresh_token, "refresh-token");
+        assert_eq!(credentials.account_id, "account-id");
+        assert_eq!(credentials.expires_at_ms, 0);
+    }
+
+    #[test]
+    fn rejects_auth_json_without_tokens() {
+        assert!(credentials_from_auth_json_str(r#"{"auth_mode":"chatgpt"}"#).is_err());
+    }
 }
