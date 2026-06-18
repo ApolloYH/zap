@@ -1764,6 +1764,18 @@ define_settings_group!(AISettings, settings: [
         toml_path: "general.default_tab_config_path",
     }
 
+    // The specific third-party CLI agent to launch when the default session mode is Agent.
+    // Empty string means the built-in Zap Agent should be used.
+    default_cli_agent: DefaultCLIAgent {
+        type: String,
+        default: String::new(),
+        supported_platforms: SupportedPlatforms::ALL,
+        sync_to_cloud: SyncToCloud::Never,
+        private: false,
+        toml_path: "agents.third_party.default_agent",
+        description: "The CLI agent launched when Agent is the default session mode.",
+    }
+
     // Whether file-based MCP servers from third-party AI tools (e.g. Claude, Codex) should
     // be automatically detected and spawned. Zap-native config files (.warp/.mcp.json) are
     // always detected and spawned, regardless of this setting.
@@ -2465,6 +2477,22 @@ impl AISettings {
             .get(agent.to_serialized_name().as_str())
             .map(|s| s.titlebar)
             .unwrap_or_else(|| PerAgentSettings::default_for(agent).titlebar)
+    }
+
+    /// The specific CLI agent to use when the default session mode is Agent.
+    /// Returns None when the built-in Zap Agent should be used.
+    pub fn default_cli_agent(&self) -> Option<CLIAgent> {
+        let agent = CLIAgent::from_serialized_name(&self.default_cli_agent);
+        (!matches!(agent, CLIAgent::Unknown)).then_some(agent)
+    }
+
+    pub fn set_default_cli_agent(
+        &mut self,
+        agent: Option<CLIAgent>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let value = agent.map(|agent| agent.to_serialized_name()).unwrap_or_default();
+        report_if_error!(self.default_cli_agent.set_value(value, ctx));
     }
 
     /// 设置单个 agent 的工具栏启用状态。

@@ -1108,16 +1108,20 @@ impl SshManagerPanel {
         .finish();
 
         // 右侧 Refresh 按钮 —— 任何状态(NotFound / Error / Loaded)都允许刷新。
+        // 默认隐藏,只在 header/按钮悬停时出现;否则容易看起来像候选加载卡住。
+        let show_refresh = can_refresh
+            && (self.candidates_toggle_btn.lock().unwrap().is_hovered()
+                || self.candidates_refresh_btn.lock().unwrap().is_hovered());
         let refresh_state = self.candidates_refresh_btn.clone();
-        let refresh_icon = ConstrainedBox::new(
-            crate::ui_components::icons::Icon::Refresh
-                .to_warpui_icon(icon_color)
-                .finish(),
-        )
-        .with_width(ITEM_ICON_SIZE)
-        .with_height(ITEM_ICON_SIZE)
-        .finish();
-        let refresh_btn = if can_refresh {
+        let refresh_slot: Box<dyn Element> = if show_refresh {
+            let refresh_icon = ConstrainedBox::new(
+                crate::ui_components::icons::Icon::Refresh
+                    .to_warpui_icon(icon_color)
+                    .finish(),
+            )
+            .with_width(ITEM_ICON_SIZE)
+            .with_height(ITEM_ICON_SIZE)
+            .finish();
             Hoverable::new(refresh_state, move |_| {
                 Container::new(refresh_icon)
                     .with_uniform_padding(2.0)
@@ -1130,7 +1134,10 @@ impl SshManagerPanel {
             })
             .finish()
         } else {
-            refresh_icon
+            ConstrainedBox::new(Empty::new().finish())
+                .with_width(ITEM_ICON_SIZE + 4.0)
+                .with_height(ITEM_ICON_SIZE + 4.0)
+                .finish()
         };
 
         // 整行:chevron + 标签(吃中间空间)+ count + Refresh 按钮。
@@ -1146,7 +1153,7 @@ impl SshManagerPanel {
                     .with_width(8.0)
                     .finish(),
             )
-            .with_child(refresh_btn)
+            .with_child(refresh_slot)
             .with_main_axis_size(MainAxisSize::Max)
             .with_main_axis_alignment(MainAxisAlignment::Start)
             .finish();

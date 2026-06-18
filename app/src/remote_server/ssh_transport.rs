@@ -613,31 +613,39 @@ impl RemoteTransport for SshTransport {
     fn check_has_old_binary(&self) -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + Send>> {
         let socket_path = self.socket_path.clone();
         Box::pin(async move {
-            // Treat the existence of the remote-server install directory
-            // itself as evidence of a prior install. If `~/.warp-XX/remote-server`
-            // exists, something was installed there before, so any mismatch
-            // with the client's expected binary path should be auto-updated
-            // rather than surfaced as a first-time install prompt.
-            let cmd = format!("test -d {}", remote_server::setup::remote_server_dir());
+            // Treat only an actual remote-server binary as evidence of a prior
+            // install. Failed installs can leave the directory behind with only
+            // `.install.*` staging files; showing those as "Updating" makes
+            // every SSH connection look like an update loop.
+            let dir = remote_server::setup::remote_server_dir();
+            let name = remote_server::setup::binary_name();
+            let versioned_name = format!("{name}-*");
+            let quoted_name = shell_words::quote(name);
+            let quoted_versioned_name = shell_words::quote(&versioned_name);
+            // Keep the install dir unquoted so the remote shell expands `~/`.
+            // The value comes from channel constants, not user input.
+            let cmd = format!(
+                "find {dir} -maxdepth 1 -type f \\( -name {quoted_name} -o -name {quoted_versioned_name} \\) -perm -u=x -print -quit | grep -q ."
+            );
             let output = remote_server::ssh::run_ssh_command(
                 &socket_path,
                 &cmd,
                 remote_server::setup::CHECK_TIMEOUT,
             )
             .await?;
-            // `test -d` exits 0 when present, 1 when missing.
-            // Anything else is treated as a check failure.
+            // `grep -q` exits 0 when a candidate binary exists, 1 when it
+            // does not. Anything else is treated as a check failure.
             match output.status.code() {
                 Some(0) => Ok(true),
                 Some(1) => Ok(false),
                 Some(code) => {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     Err(anyhow::anyhow!(
-                        "remote-server dir check exited with code {code}: {stderr}"
+                        "remote-server binary scan exited with code {code}: {stderr}"
                     ))
                 }
                 None => Err(anyhow::anyhow!(
-                    "remote-server dir check terminated by signal"
+                    "remote-server binary scan terminated by signal"
                 )),
             }
         })

@@ -1819,6 +1819,7 @@ impl TypedActionView for FeaturesPageView {
                     report_if_error!(ai_settings
                         .default_tab_config_path
                         .set_value(path.clone(), ctx));
+                    ai_settings.set_default_cli_agent(None, ctx);
                 });
             }
             SearchForKeybinding(query) => {
@@ -3425,6 +3426,7 @@ impl FeaturesPageView {
             report_if_error!(ai_settings
                 .default_session_mode_internal
                 .set_value(*value, ctx));
+            ai_settings.set_default_cli_agent(None, ctx);
         });
     }
 

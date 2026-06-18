@@ -104,6 +104,7 @@ fn apply_agent_settings(agent_settings: &AgentDevelopmentSettings, app: &mut App
         report_if_error!(settings
             .default_session_mode_internal
             .set_value(default_mode, ctx));
+        settings.set_default_cli_agent(None, ctx);
     });
 
     let workspace_autonomy_settings = UserWorkspaces::as_ref(app).ai_autonomy_settings();

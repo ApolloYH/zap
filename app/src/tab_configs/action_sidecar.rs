@@ -14,7 +14,7 @@ use warpui::{
 
 use crate::{
     appearance::Appearance, settings::ai::DefaultSessionMode, tab_configs::TabConfig,
-    terminal::available_shells::AvailableShell, workspace::WorkspaceAction,
+    terminal::{available_shells::AvailableShell, CLIAgent}, workspace::WorkspaceAction,
 };
 
 pub(crate) const SIDECAR_WIDTH: f32 = 260.;
@@ -28,6 +28,7 @@ pub(crate) enum SidecarItemKind {
         name: String,
         default_mode: DefaultSessionMode,
         shell: Option<AvailableShell>,
+        cli_agent: Option<CLIAgent>,
     },
     /// A user-created tab config loaded from disk.
     UserTabConfig { config: TabConfig },
@@ -110,16 +111,19 @@ pub(crate) fn render_action_sidecar(
         SidecarItemKind::BuiltIn {
             default_mode,
             shell,
+            cli_agent,
             ..
         } => WorkspaceAction::TabConfigSidecarMakeDefault {
             mode: *default_mode,
             tab_config_path: None,
             shell: shell.clone(),
+            cli_agent: *cli_agent,
         },
         SidecarItemKind::UserTabConfig { config } => WorkspaceAction::TabConfigSidecarMakeDefault {
             mode: DefaultSessionMode::TabConfig,
             tab_config_path: config.source_path.clone(),
             shell: None,
+            cli_agent: None,
         },
     };
 

@@ -608,6 +608,7 @@ pub enum WorkspaceAction {
         mode: crate::settings::ai::DefaultSessionMode,
         tab_config_path: Option<PathBuf>,
         shell: Option<AvailableShell>,
+        cli_agent: Option<CLIAgent>,
     },
     /// Sidecar action: open the tab config TOML in the user's editor.
     TabConfigSidecarEditConfig {

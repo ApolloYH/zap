@@ -382,6 +382,27 @@ fn test_toolbar_command_map_matched_agent() {
 }
 
 #[test]
+fn test_default_cli_agent_roundtrip_and_rejects_unknown() {
+    App::test((), |mut app| async move {
+        initialize_settings_for_tests(&mut app);
+
+        AISettings::handle(&app).update(&mut app, |settings, ctx| {
+            assert_eq!(settings.default_cli_agent(), None);
+            settings.set_default_cli_agent(Some(CLIAgent::Codex), ctx);
+            assert_eq!(settings.default_cli_agent(), Some(CLIAgent::Codex));
+
+            settings.set_default_cli_agent(None, ctx);
+            assert_eq!(settings.default_cli_agent(), None);
+
+            report_if_error!(settings
+                .default_cli_agent
+                .set_value("not-a-real-agent".to_string(), ctx));
+            assert_eq!(settings.default_cli_agent(), None);
+        });
+    });
+}
+
+#[test]
 fn test_should_display_quota_reset_banner_with_empty_history() {
     App::test((), |mut app| async move {
         initialize_settings_for_tests(&mut app);
