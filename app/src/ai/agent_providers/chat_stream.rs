@@ -2817,6 +2817,13 @@ fn normalize_endpoint_url(api_type: AgentProviderApiType, base_url: &str) -> Str
 
     // path == "/" 或为空 → 用户只填了 host,自动补上 api_type 默认版本路径段。
     if parsed.path() == "/" || parsed.path().is_empty() {
+        if parsed
+            .host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case("api.githubcopilot.com"))
+        {
+            let host_part = trimmed.trim_end_matches('/');
+            return format!("{host_part}/");
+        }
         // 从 default_base_url 抽 path 部分(如 "/v1/" / "/v1beta/" / "/")。
         let default_path = url::Url::parse(api_type.default_base_url())
             .ok()
@@ -3118,6 +3125,17 @@ fn build_chat_options(
         );
         opts = opts.with_extra_body(json!({"enable_thinking": true}));
     }
+    let mut extra_headers = extra_headers;
+    if let Some(cid) = conversation_id {
+        if !cid.is_empty()
+            && extra_headers
+                .iter()
+                .any(|(key, _)| key.eq_ignore_ascii_case("chatgpt-account-id"))
+        {
+            extra_headers.push(("conversation_id".to_string(), cid.to_string()));
+            extra_headers.push(("session_id".to_string(), cid.to_string()));
+        }
+    }
     if !extra_headers.is_empty() {
         opts = opts.with_extra_headers(extra_headers);
     }
@@ -3170,6 +3188,7 @@ pub struct TitleGenInput {
     pub model_id: String,
     pub api_type: AgentProviderApiType,
     pub reasoning_effort: crate::settings::ReasoningEffortSetting,
+    pub extra_headers: Vec<(String, String)>,
 }
 
 pub struct ByopOutputInput {
@@ -4340,6 +4359,7 @@ pub(crate) async fn generate_title_via_byop(
         model_id: tg.model_id.clone(),
         api_type: tg.api_type,
         reasoning_effort: tg.reasoning_effort,
+        extra_headers: tg.extra_headers.clone(),
     };
     let system = include_str!("prompts/tasks/title_system.md");
     let user_prompt = format!(
@@ -7365,5 +7385,31 @@ mod issue_94_task_linearization_tests {
             "request_id 不同的两轮 user 消息都要保留"
         );
         assert_eq!(message_ids(&out), vec!["m1", "m2", "m3"]);
+    }
+
+    #[test]
+    fn normalize_endpoint_url_keeps_copilot_root_without_v1() {
+        assert_eq!(
+            normalize_endpoint_url(
+                AgentProviderApiType::OpenAi,
+                "https://api.githubcopilot.com"
+            ),
+            "https://api.githubcopilot.com/"
+        );
+        assert_eq!(
+            normalize_endpoint_url(
+                AgentProviderApiType::OpenAi,
+                "https://api.githubcopilot.com/"
+            ),
+            "https://api.githubcopilot.com/"
+        );
+    }
+
+    #[test]
+    fn normalize_endpoint_url_keeps_regular_openai_hosts_on_v1() {
+        assert_eq!(
+            normalize_endpoint_url(AgentProviderApiType::OpenAi, "https://api.openai.com"),
+            "https://api.openai.com/v1/"
+        );
     }
 }
