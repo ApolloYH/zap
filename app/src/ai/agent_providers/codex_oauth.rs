@@ -1,11 +1,16 @@
 //! Codex / ChatGPT OAuth login support for Agent Providers.
 
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context as _};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -31,6 +36,13 @@ pub struct LoginFlow {
     pub auth_url: String,
     pub code_verifier: String,
     pub callback_rx: Receiver<anyhow::Result<String>>,
+    cancel_flag: Arc<AtomicBool>,
+}
+
+impl LoginFlow {
+    pub fn cancel_handle(&self) -> Arc<AtomicBool> {
+        self.cancel_flag.clone()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,16 +65,17 @@ pub fn request_headers(account_id: &str) -> Vec<(String, String)> {
 }
 
 pub fn begin_login() -> anyhow::Result<LoginFlow> {
-    let listener = TcpListener::bind(CALLBACK_ADDR)
-        .with_context(|| format!("无法监听 Codex OAuth 回调端口 {CALLBACK_ADDR}"))?;
+    let listener = bind_callback_listener()?;
     let state = random_string(32);
     let code_verifier = random_string(96);
     let code_challenge = pkce_challenge(&code_verifier);
     let (tx, rx) = mpsc::channel();
     let expected_state = state.clone();
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let callback_cancel_flag = cancel_flag.clone();
 
     thread::spawn(move || {
-        let result = receive_callback(listener, &expected_state);
+        let result = receive_callback(listener, &expected_state, callback_cancel_flag);
         let _ = tx.send(result);
     });
 
@@ -84,14 +97,35 @@ pub fn begin_login() -> anyhow::Result<LoginFlow> {
         auth_url: auth_url.to_string(),
         code_verifier,
         callback_rx: rx,
+        cancel_flag,
     })
+}
+
+fn bind_callback_listener() -> anyhow::Result<TcpListener> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match TcpListener::bind(CALLBACK_ADDR) {
+            Ok(listener) => return Ok(listener),
+            Err(e) if e.kind() == ErrorKind::AddrInUse && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("无法监听 Codex OAuth 回调端口 {CALLBACK_ADDR}"));
+            }
+        }
+    }
 }
 
 pub async fn wait_for_login(flow: LoginFlow) -> anyhow::Result<AgentProviderOAuthCredentials> {
     let code = tokio::task::spawn_blocking(move || {
+        let cancel_flag = flow.cancel_flag.clone();
         flow.callback_rx
             .recv_timeout(Duration::from_secs(300))
-            .map_err(|_| anyhow!("Codex OAuth 登录超时"))?
+            .map_err(|_| {
+                cancel_flag.store(true, Ordering::Relaxed);
+                anyhow!("Codex OAuth 登录超时")
+            })?
             .map(|code| (code, flow.code_verifier))
     })
     .await
@@ -103,7 +137,7 @@ pub async fn wait_for_login(flow: LoginFlow) -> anyhow::Result<AgentProviderOAut
 pub async fn refresh_credentials(
     credentials: &AgentProviderOAuthCredentials,
 ) -> anyhow::Result<AgentProviderOAuthCredentials> {
-    let client = reqwest::Client::new();
+    let client = http_client::Client::new();
     let token: TokenResponse = client
         .post(TOKEN_URL)
         .form(&[
@@ -124,7 +158,7 @@ async fn exchange_code(
     code: &str,
     code_verifier: &str,
 ) -> anyhow::Result<AgentProviderOAuthCredentials> {
-    let client = reqwest::Client::new();
+    let client = http_client::Client::new();
     let token: TokenResponse = client
         .post(TOKEN_URL)
         .form(&[
@@ -163,8 +197,25 @@ fn credentials_from_token_response(
     })
 }
 
-fn receive_callback(listener: TcpListener, expected_state: &str) -> anyhow::Result<String> {
-    let (mut stream, _) = listener.accept()?;
+fn receive_callback(
+    listener: TcpListener,
+    expected_state: &str,
+    cancel_flag: Arc<AtomicBool>,
+) -> anyhow::Result<String> {
+    listener.set_nonblocking(true)?;
+    let mut stream = loop {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err(anyhow!("Codex OAuth 登录已取消"));
+        }
+
+        match listener.accept() {
+            Ok((stream, _)) => break stream,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(100))
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
     let request = read_http_request(&mut stream)?;
     let path = request
         .lines()

@@ -30,8 +30,8 @@ use crate::settings::{
     ShowAgentZeroStateHints, ShowConversationHistory, ShowHintText, ThinkingDisplayMode,
     VoiceInputEnabled,
 };
-use crate::terminal::session_settings::{SessionSettings, SessionSettingsChangedEvent};
 use crate::terminal::cli_agent::{CLIAgentInstallEvent, CLIAgentInstallModel};
+use crate::terminal::session_settings::{SessionSettings, SessionSettingsChangedEvent};
 use crate::terminal::CLIAgent;
 use crate::view_components::DismissibleToast;
 use crate::view_components::DismissibleToastStack;
@@ -53,14 +53,14 @@ use warp_core::ui::theme::color::internal_colors;
 use warpui::clipboard::ClipboardContent;
 use warpui::elements::{
     Border, ChildView, ConstrainedBox, CornerRadius, CrossAxisAlignment, Dismiss, Empty, Expanded,
-    Fill, Hoverable, HyperlinkLens, MainAxisAlignment, MainAxisSize, MouseStateHandle, Radius, Shrinkable,
-    Text,
+    Fill, Hoverable, HyperlinkLens, MainAxisAlignment, MainAxisSize, MouseStateHandle, Radius,
+    Shrinkable, Text,
 };
 use warpui::fonts::{Properties, Weight};
-use warpui::platform::Cursor;
-use warpui::text_layout::TextAlignment;
 use warpui::id;
 use warpui::keymap::ContextPredicate;
+use warpui::platform::Cursor;
+use warpui::text_layout::TextAlignment;
 use warpui::ui_components::slider::SliderStateHandle;
 use warpui::{
     elements::{
@@ -389,6 +389,7 @@ pub struct AISettingsPageView {
     profile_views: Vec<ViewHandle<ExecutionProfileView>>,
     add_profile_button: ViewHandle<ActionButton>,
 
+    active_codex_login_cancel_handle: Option<Arc<AtomicBool>>,
     active_copilot_login_cancel_handle: Option<Arc<AtomicBool>>,
 }
 
@@ -1387,6 +1388,7 @@ impl AISettingsPageView {
             conversation_layout_dropdown,
             profile_views,
             add_profile_button,
+            active_codex_login_cancel_handle: None,
             active_copilot_login_cancel_handle: None,
         }
     }
@@ -2189,12 +2191,29 @@ impl AISettingsPageView {
         ctx: &mut ViewContext<Self>,
     ) {
         let mut provider_id = String::new();
+        let mut removed_provider_ids = Vec::new();
         AISettings::handle(ctx).update(ctx, |settings, ctx| {
             let mut providers = settings.agent_providers.value().clone();
-            providers.push(crate::settings::AgentProvider::new_empty());
-            let provider = providers
-                .last_mut()
-                .expect("provider was just pushed into the list");
+            let target_index = if let Some(existing_index) =
+                providers.iter().position(|p| p.auth_kind == auth_kind)
+            {
+                let target_id = providers[existing_index].id.clone();
+                providers.retain(|provider| {
+                    let should_remove = provider.auth_kind == auth_kind && provider.id != target_id;
+                    if should_remove {
+                        removed_provider_ids.push(provider.id.clone());
+                    }
+                    !should_remove
+                });
+                providers
+                    .iter()
+                    .position(|p| p.id == target_id)
+                    .expect("existing provider should remain after dedupe")
+            } else {
+                providers.push(crate::settings::AgentProvider::new_empty());
+                providers.len() - 1
+            };
+            let provider = &mut providers[target_index];
 
             provider_id = provider.id.clone();
             provider.name = provider_name.to_string();
@@ -2208,12 +2227,24 @@ impl AISettingsPageView {
         });
 
         if !provider_id.is_empty() {
-            crate::ai::agent_providers::AgentProviderOAuthSecrets::handle(ctx)
-                .update(ctx, |secrets, ctx| {
-                    secrets.set(&provider_id, credentials, ctx)
-                });
-            crate::ai::agent_providers::AgentProviderSecrets::handle(ctx)
-                .update(ctx, |secrets, ctx| secrets.remove(&provider_id, ctx));
+            crate::ai::agent_providers::AgentProviderOAuthSecrets::handle(ctx).update(
+                ctx,
+                |secrets, ctx| {
+                    secrets.set(&provider_id, credentials, ctx);
+                    for removed_provider_id in &removed_provider_ids {
+                        secrets.remove(removed_provider_id, ctx);
+                    }
+                },
+            );
+            crate::ai::agent_providers::AgentProviderSecrets::handle(ctx).update(
+                ctx,
+                |secrets, ctx| {
+                    secrets.remove(&provider_id, ctx);
+                    for removed_provider_id in &removed_provider_ids {
+                        secrets.remove(removed_provider_id, ctx);
+                    }
+                },
+            );
         }
     }
 
@@ -2283,6 +2314,12 @@ impl AISettingsPageView {
 
     fn cancel_active_copilot_login(&mut self) {
         if let Some(cancel_handle) = self.active_copilot_login_cancel_handle.take() {
+            cancel_handle.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn cancel_active_codex_login(&mut self) {
+        if let Some(cancel_handle) = self.active_codex_login_cancel_handle.take() {
             cancel_handle.store(true, Ordering::Relaxed);
         }
     }
@@ -3212,6 +3249,7 @@ impl TypedActionView for AISettingsPageView {
                 self.rebuild_current_page(ctx);
             }
             AISettingsPageAction::StartCodexAuthLogin => {
+                self.cancel_active_codex_login();
                 let flow = match crate::ai::agent_providers::codex_oauth::begin_login() {
                     Ok(flow) => flow,
                     Err(e) => {
@@ -3227,6 +3265,8 @@ impl TypedActionView for AISettingsPageView {
                         return;
                     }
                 };
+                let cancel_handle = flow.cancel_handle();
+                self.active_codex_login_cancel_handle = Some(cancel_handle.clone());
                 ctx.open_url(&flow.auth_url);
                 ctx.spawn(
                     async move {
@@ -3253,90 +3293,121 @@ impl TypedActionView for AISettingsPageView {
                                 ctx.notify();
                             }
                         }
+                        cancel_handle.store(true, Ordering::Relaxed);
+                        if view
+                            .active_codex_login_cancel_handle
+                            .as_ref()
+                            .is_some_and(|active| Arc::ptr_eq(active, &cancel_handle))
+                        {
+                            view.active_codex_login_cancel_handle = None;
+                        }
                         view.rebuild_current_page(ctx);
                     },
                 );
             }
             AISettingsPageAction::StartCopilotAuthLogin => {
                 self.cancel_active_copilot_login();
-                let flow = match crate::ai::agent_providers::copilot_oauth::begin_login() {
-                    Ok(flow) => flow,
-                    Err(e) => {
-                        log::warn!("Failed to start Copilot OAuth login: {e:#}");
-                        ctx.notify();
-                        return;
-                    }
-                };
                 let window_id = ctx.window_id();
-                log::info!("Started Copilot OAuth device flow. User code copied to clipboard");
-                ctx.clipboard()
-                    .write(ClipboardContent::plain_text(flow.user_code.clone()));
-                let toast_id = "copilot-oauth-login".to_string();
-                let cancel_handle = flow.cancel_handle();
-                self.active_copilot_login_cancel_handle = Some(cancel_handle.clone());
-                Self::add_persistent_info_toast(
-                    crate::t!(
-                        "settings-agent-providers-copilot-login-code-toast",
-                        code = flow.user_code.clone()
-                    ),
-                    toast_id.clone(),
-                    {
-                        let cancel_handle = cancel_handle.clone();
-                        move |_ctx| {
-                            cancel_handle.store(true, Ordering::Relaxed);
-                        }
-                    },
-                    ctx,
-                );
-                ctx.open_url(&flow.auth_url);
                 ctx.spawn(
                     async move {
                         use crate::ai::agent_providers::copilot_oauth;
 
-                        let credentials = copilot_oauth::wait_for_login(flow).await?;
-                        let models = copilot_oauth::fetch_copilot_oauth_models(
-                            copilot_oauth::github_token(&credentials),
-                        )
-                        .await
-                        .unwrap_or_else(|e| {
-                            log::warn!("Failed to fetch Copilot OAuth models: {e:#}");
-                            copilot_oauth::default_copilot_oauth_models()
-                        });
-                        anyhow::Ok((credentials, models))
+                        copilot_oauth::begin_login().await
                     },
-                    move |view, result, ctx| {
-                        ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
-                            toast_stack.remove_toast_by_identifier(
-                                "copilot-oauth-login".to_string(),
-                                window_id,
+                    move |view, result, ctx| match result {
+                        Ok(flow) => {
+                            log::info!(
+                                "Started Copilot OAuth device flow. User code copied to clipboard"
+                            );
+                            ctx.clipboard()
+                                .write(ClipboardContent::plain_text(flow.user_code.clone()));
+                            let toast_id = "copilot-oauth-login".to_string();
+                            let cancel_handle = flow.cancel_handle();
+                            view.active_copilot_login_cancel_handle =
+                                Some(cancel_handle.clone());
+                            Self::add_persistent_info_toast(
+                                crate::t!(
+                                    "settings-agent-providers-copilot-login-code-toast",
+                                    code = flow.user_code.clone()
+                                ),
+                                toast_id,
+                                {
+                                    let cancel_handle = cancel_handle.clone();
+                                    move |_ctx| {
+                                        cancel_handle.store(true, Ordering::Relaxed);
+                                    }
+                                },
                                 ctx,
                             );
-                        });
-                        match result {
-                            Ok((credentials, models)) => {
-                                Self::add_copilot_oauth_provider(credentials, models, ctx);
-                            }
-                            Err(e) => {
-                                log::warn!("Copilot OAuth login failed: {e:#}");
-                                Self::add_info_toast(
-                                    crate::t!(
-                                        "settings-agent-providers-copilot-login-failed-toast",
-                                        error = format!("{e:#}")
-                                    ),
-                                    ctx,
-                                );
-                                ctx.notify();
-                            }
+                            ctx.open_url(&flow.auth_url);
+                            ctx.spawn(
+                                async move {
+                                    use crate::ai::agent_providers::copilot_oauth;
+
+                                    let credentials = copilot_oauth::wait_for_login(flow).await?;
+                                    let models = copilot_oauth::fetch_copilot_oauth_models(
+                                        copilot_oauth::github_token(&credentials),
+                                    )
+                                    .await
+                                    .unwrap_or_else(|e| {
+                                        log::warn!(
+                                            "Failed to fetch Copilot OAuth models: {e:#}"
+                                        );
+                                        copilot_oauth::default_copilot_oauth_models()
+                                    });
+                                    anyhow::Ok((credentials, models))
+                                },
+                                move |view, result, ctx| {
+                                    ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                                        toast_stack.remove_toast_by_identifier(
+                                            "copilot-oauth-login".to_string(),
+                                            window_id,
+                                            ctx,
+                                        );
+                                    });
+                                    match result {
+                                        Ok((credentials, models)) => {
+                                            Self::add_copilot_oauth_provider(
+                                                credentials,
+                                                models,
+                                                ctx,
+                                            );
+                                        }
+                                        Err(e) => {
+                                            log::warn!("Copilot OAuth login failed: {e:#}");
+                                            Self::add_info_toast(
+                                                crate::t!(
+                                                    "settings-agent-providers-copilot-login-failed-toast",
+                                                    error = format!("{e:#}")
+                                                ),
+                                                ctx,
+                                            );
+                                            ctx.notify();
+                                        }
+                                    }
+                                    cancel_handle.store(true, Ordering::Relaxed);
+                                    if view
+                                        .active_copilot_login_cancel_handle
+                                        .as_ref()
+                                        .is_some_and(|active| Arc::ptr_eq(active, &cancel_handle))
+                                    {
+                                        view.active_copilot_login_cancel_handle = None;
+                                    }
+                                    view.rebuild_current_page(ctx);
+                                },
+                            );
                         }
-                        cancel_handle.store(true, Ordering::Relaxed);
-                        if view
-                            .active_copilot_login_cancel_handle
-                            .as_ref()
-                            .is_some_and(|active| Arc::ptr_eq(active, &cancel_handle))
-                        {
-                            view.active_copilot_login_cancel_handle = None;
+                        Err(e) => {
+                            log::warn!("Failed to start Copilot OAuth login: {e:#}");
+                            Self::add_info_toast(
+                                crate::t!(
+                                    "settings-agent-providers-copilot-login-failed-toast",
+                                    error = format!("{e:#}")
+                                ),
+                                ctx,
+                            );
+                            ctx.notify();
                         }
-                        view.rebuild_current_page(ctx);
                     },
                 );
             }
@@ -5338,7 +5409,9 @@ impl AgentsWidget {
                     styles::description_font_color(ai_settings.is_any_ai_enabled(app), app).into(),
                     HighlightedHyperlink::default(),
                 )
-                .with_heading_to_font_size_multipliers(appearance.heading_font_size_multipliers().clone())
+                .with_heading_to_font_size_multipliers(
+                    appearance.heading_font_size_multipliers().clone(),
+                )
                 .with_hyperlink_font_color(appearance.theme().accent().into_solid())
                 .register_default_click_handlers_with_action_support(|hyperlink_lens, ctx, _app| {
                     match hyperlink_lens {
@@ -5669,7 +5742,9 @@ impl AIInputWidget {
                         styles::description_font_color(is_toggleable, app).into(),
                         incorrect_autodetection_highlight_index,
                     )
-                    .with_heading_to_font_size_multipliers(appearance.heading_font_size_multipliers().clone())
+                    .with_heading_to_font_size_multipliers(
+                        appearance.heading_font_size_multipliers().clone(),
+                    )
                     .with_hyperlink_font_color(appearance.theme().accent().into_solid())
                     .register_default_click_handlers(|url, ctx, _| {
                         ctx.dispatch_typed_action(AISettingsPageAction::HyperlinkClick(url));
@@ -5720,7 +5795,9 @@ impl AIInputWidget {
                         styles::description_font_color(is_toggleable, app).into(),
                         incorrect_autodetection_highlight_index,
                     )
-                    .with_heading_to_font_size_multipliers(appearance.heading_font_size_multipliers().clone())
+                    .with_heading_to_font_size_multipliers(
+                        appearance.heading_font_size_multipliers().clone(),
+                    )
                     .with_hyperlink_font_color(appearance.theme().accent().into_solid())
                     .register_default_click_handlers(|url, ctx, _| {
                         ctx.dispatch_typed_action(AISettingsPageAction::HyperlinkClick(url));
@@ -5817,7 +5894,9 @@ impl SettingsWidget for MCPServersWidget {
                 styles::description_font_color(is_any_ai_enabled, app).into(),
                 self.mcp_docs_link_index.clone(),
             )
-            .with_heading_to_font_size_multipliers(appearance.heading_font_size_multipliers().clone())
+            .with_heading_to_font_size_multipliers(
+                appearance.heading_font_size_multipliers().clone(),
+            )
             .with_hyperlink_font_color(appearance.theme().accent().into_solid())
             .register_default_click_handlers(|url, ctx, _| {
                 ctx.dispatch_typed_action(AISettingsPageAction::HyperlinkClick(url));
@@ -5946,7 +6025,9 @@ impl AIFactWidget {
                 styles::description_font_color(ai_settings.is_any_ai_enabled(app), app).into(),
                 self.rules_link_index.clone(),
             )
-            .with_heading_to_font_size_multipliers(appearance.heading_font_size_multipliers().clone())
+            .with_heading_to_font_size_multipliers(
+                appearance.heading_font_size_multipliers().clone(),
+            )
             .with_hyperlink_font_color(appearance.theme().accent().into_solid())
             .register_default_click_handlers(|url, ctx, _| {
                 ctx.dispatch_typed_action(AISettingsPageAction::HyperlinkClick(url));
@@ -6806,11 +6887,13 @@ impl CLIAgentWidget {
         });
 
         if is_clickable {
-            chip = chip.with_cursor(Cursor::PointingHand).on_click(move |ctx, _, _| {
-                ctx.dispatch_typed_action(AISettingsPageAction::ToggleCLIAgentPerAgent(
-                    agent, dimension,
-                ));
-            });
+            chip = chip
+                .with_cursor(Cursor::PointingHand)
+                .on_click(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(AISettingsPageAction::ToggleCLIAgentPerAgent(
+                        agent, dimension,
+                    ));
+                });
         }
 
         chip.finish()

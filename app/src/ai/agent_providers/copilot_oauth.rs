@@ -1,12 +1,12 @@
 //! GitHub Copilot / GitHub Models OAuth 登录支持。
 
 use std::sync::{
-    Arc,
     atomic::{AtomicBool, Ordering},
+    Arc,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context as _, anyhow};
+use anyhow::{anyhow, Context as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -81,47 +81,8 @@ struct AccessTokenRequest<'a> {
     grant_type: &'a str,
 }
 
-#[cfg(not(target_family = "wasm"))]
-fn build_blocking_reqwest_client() -> anyhow::Result<reqwest::blocking::Client> {
-    use http_client::ProxyMode;
-
-    let cfg = http_client::current_proxy_config();
-    let builder = match cfg.mode {
-        ProxyMode::System => reqwest::blocking::Client::builder(),
-        ProxyMode::Off => reqwest::blocking::Client::builder().no_proxy(),
-        ProxyMode::Custom => {
-            let trimmed = cfg.url.trim();
-            if trimmed.is_empty() {
-                reqwest::blocking::Client::builder()
-            } else {
-                let mut proxy = reqwest::Proxy::all(trimmed)
-                    .with_context(|| format!("无效的 HTTP 代理 URL: {trimmed}"))?;
-                if !cfg.username.is_empty() || !cfg.password.is_empty() {
-                    proxy = proxy.basic_auth(&cfg.username, &cfg.password);
-                }
-                if !cfg.no_proxy.trim().is_empty() {
-                    if let Some(no_proxy) = reqwest::NoProxy::from_string(cfg.no_proxy.trim()) {
-                        proxy = proxy.no_proxy(Some(no_proxy));
-                    }
-                }
-                reqwest::blocking::Client::builder().proxy(proxy)
-            }
-        }
-    };
-    builder
-        .build()
-        .context("构造 Copilot blocking HTTP 客户端失败")
-}
-
-#[cfg(target_family = "wasm")]
-fn build_blocking_reqwest_client() -> anyhow::Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
-        .build()
-        .context("构造 Copilot blocking HTTP 客户端失败")
-}
-
-pub fn begin_login() -> anyhow::Result<LoginFlow> {
-    let client = build_blocking_reqwest_client()?;
+pub async fn begin_login() -> anyhow::Result<LoginFlow> {
+    let client = http_client::Client::new();
     let response = client
         .post(GITHUB_DEVICE_CODE_URL)
         .header("Accept", "application/json")
@@ -132,10 +93,12 @@ pub fn begin_login() -> anyhow::Result<LoginFlow> {
             scope: OAUTH_SCOPE,
         })
         .send()
+        .await
         .context("请求 GitHub device code 失败")?
         .error_for_status()
-        .context("GitHub device code 返回错误状态")?
+        .map_err(|e| anyhow::Error::new(e).context("GitHub device code 返回错误状态"))?
         .json::<DeviceCodeResponse>()
+        .await
         .context("解析 GitHub device code 响应失败")?;
 
     let now_ms = SystemTime::now()
@@ -155,7 +118,10 @@ pub fn begin_login() -> anyhow::Result<LoginFlow> {
 
 pub fn request_headers() -> Vec<(String, String)> {
     vec![
-        ("Openai-Intent".to_string(), "conversation-edits".to_string()),
+        (
+            "Openai-Intent".to_string(),
+            "conversation-edits".to_string(),
+        ),
         ("X-Initiator".to_string(), "agent".to_string()),
         ("Editor-Version".to_string(), EDITOR_VERSION.to_string()),
         (
@@ -187,6 +153,9 @@ pub async fn wait_for_login(flow: LoginFlow) -> anyhow::Result<AgentProviderOAut
         }
 
         tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+        if flow.cancel_flag.load(Ordering::Relaxed) {
+            return Err(anyhow!("Copilot 登录已取消"));
+        }
 
         let payload = client
             .post(GITHUB_ACCESS_TOKEN_URL)
@@ -208,7 +177,15 @@ pub async fn wait_for_login(flow: LoginFlow) -> anyhow::Result<AgentProviderOAut
             .context("解析 GitHub access token 响应失败")?;
 
         if let Some(access_token) = payload.access_token {
+            if flow.cancel_flag.load(Ordering::Relaxed) {
+                return Err(anyhow!("Copilot 登录已取消"));
+            }
+
             let account_id = fetch_github_login(&access_token).await?;
+            if flow.cancel_flag.load(Ordering::Relaxed) {
+                return Err(anyhow!("Copilot 登录已取消"));
+            }
+
             return Ok(AgentProviderOAuthCredentials {
                 kind: AgentProviderOAuthKind::Copilot,
                 // 对齐 opencode:GitHub OAuth token 直接作为 api.githubcopilot.com
@@ -292,15 +269,16 @@ pub async fn fetch_copilot_oauth_models(
     token: &str,
 ) -> anyhow::Result<Vec<crate::settings::AgentProviderModel>> {
     let client = http_client::Client::new();
-    let headers = request_headers();
-    let payload = client
+    let mut request = client
         .get(GITHUB_COPILOT_MODELS_URL)
         .header("Accept", "application/json")
         .header("Authorization", format!("Bearer {token}"))
-        .header("User-Agent", USER_AGENT)
-        .header(&headers[0].0, &headers[0].1)
-        .header(&headers[1].0, &headers[1].1)
-        .header(&headers[2].0, &headers[2].1)
+        .header("User-Agent", USER_AGENT);
+    for (name, value) in request_headers() {
+        request = request.header(name, value);
+    }
+
+    let payload = request
         .send()
         .await
         .context("请求 GitHub Copilot models 失败")?
